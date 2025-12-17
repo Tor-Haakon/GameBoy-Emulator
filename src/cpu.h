@@ -69,6 +69,10 @@ void clear_flag(uint8_t flag){
     cpu.F &= ~flag;
 }
 
+void clear_all_flags(){
+    cpu.F = 0;
+}
+
 void dma_transfer(uint8_t transfer_source) {
     uint16_t start_addr = (transfer_source << 8);
     for (int i = 0; i < 160; i++) {
@@ -81,10 +85,16 @@ uint8_t read_from_memory(uint16_t addr) {
         return 0xFF;
     if (addr >= 0xFE00 && addr <= 0xFE9F && (get_ppu_mode() == 2 || get_ppu_mode() == 3))
         return 0xFF;
+    // if (addr == LY)
+    //     return 0x90;
     return memory[addr];
 }
 
-void write_to_memory(uint16_t addr, uint8_t value){
+void write_to_memory(uint16_t addr, uint8_t value) {
+    if (addr >= 0x10000){
+        printf("This address is too big\n");
+        return;
+    }
     if (addr == DMA) {
         dma_transfer(value);
         return;
@@ -95,14 +105,18 @@ void write_to_memory(uint16_t addr, uint8_t value){
         return;
     if (addr >= 0xFE00 && addr <= 0xFE9F && (get_ppu_mode() == 2 || get_ppu_mode() == 3))
         return;
+    if (addr == DIV) {
+        memory[DIV] = 0;
+        return;
+    }
     if (addr == LCDC) {
         if (value & 0x80) {
-            set_ppu_mode(2);
-            memory[LY] = 0;
-            scanline_dot_counter = 0;
+            set_ppu_mode(2);            
         }
         else {
             set_ppu_mode(0);
+            memory[LY] = 0;
+            scanline_dot_counter = 0;
         }
     }
     memory[addr] = value;
@@ -320,15 +334,12 @@ uint8_t cpu_execute(uint16_t opcode) {
 
         // LD HL,SP+e8
         case(0xF8): {
-            int8_t e8;
-            uint8_t n8 = memory[cpu.PC+1];
-            if (n8 & 0x80) e8 = -(n8 & 0x7F);
-            else e8 = n8 & 0x7F;
+            int8_t e8 = (int8_t)memory[cpu.PC+1];
             uint16_t result = cpu.SP + e8;
 
-            cpu.F = 0;
+            clear_all_flags();
             if (((cpu.SP & 0xF) + (e8 & 0xF)) > 0xF) set_flag(FLAG_H);
-            if (result > 0xFF) set_flag(FLAG_C);
+            if (((cpu.SP & 0xFF) + (e8 & 0xFF)) > 0xFF) set_flag(FLAG_C);
 
             cpu.HL = result;
             cpu.PC += 2;
@@ -354,7 +365,9 @@ uint8_t cpu_execute(uint16_t opcode) {
             uint8_t *regs[8] = {&cpu.B, &cpu.C, &cpu.D, &cpu.E, &cpu.H, &cpu.L, NULL, &cpu.A};
             r8 = *regs[opcode - 0x88];
 
-            uint8_t carry = is_set(FLAG_C);
+            uint8_t carry = 0;
+            if (is_set(FLAG_C))
+                carry = 1;
             uint16_t result = r8 + carry + cpu.A;
 
             cpu.F = 0;
@@ -372,9 +385,12 @@ uint8_t cpu_execute(uint16_t opcode) {
         // ADC A, [HL]/n8
         case(0x8E): case(0xCE): {
             uint8_t n8;
-            if (opcode == 0x8E) n8 = memory[cpu.PC+1];
+            if (opcode == 0xCE) n8 = memory[cpu.PC+1];
             else n8 = read_from_memory(cpu.HL);
-            uint8_t carry = is_set(FLAG_C);
+            uint8_t carry = 0;
+            if (is_set(FLAG_C))
+                carry = 1;
+            
             uint16_t result = n8 + carry + cpu.A;
 
             cpu.F = 0;
@@ -398,15 +414,15 @@ uint8_t cpu_execute(uint16_t opcode) {
             r8 = *regs[opcode - 0x80];
             uint16_t result = r8 + cpu.A;
 
-            cpu.F = 0;
+            clear_all_flags();
             if ((result & 0xFF) == 0) set_flag(FLAG_Z);
-            // N flag is alwayz zero for ADD
             if (((cpu.A & 0xF) + (r8 & 0xF)) & 0x10) set_flag(FLAG_H);
             if (result > 0xFF) set_flag(FLAG_C);
 
             cpu.A = (uint8_t)result;
             cpu.PC += 1;
             M_cycles = 1;
+            break;
         }
 
         // ADD A, [HL]/n8
@@ -423,8 +439,8 @@ uint8_t cpu_execute(uint16_t opcode) {
             if (result > 0xFF) set_flag(FLAG_C);
 
             cpu.A = (uint8_t)result;
-            if (opcode == 0x86) cpu.PC += 2;
-            else cpu.PC += 1;
+            if (opcode == 0x86) cpu.PC += 1;
+            else cpu.PC += 2;
             M_cycles = 2;
             break;
         }
@@ -530,7 +546,7 @@ uint8_t cpu_execute(uint16_t opcode) {
             clear_flag(FLAG_N);
             clear_flag(FLAG_H);
             if (result == 0) set_flag(FLAG_Z);
-            if (((r8 & 0xF) + 1) > 0x10) set_flag(FLAG_H);
+            if (((r8 & 0xF) + 1) >= 0x10) set_flag(FLAG_H);
 
             *reg = result;
             cpu.PC += 1;
@@ -650,7 +666,7 @@ uint8_t cpu_execute(uint16_t opcode) {
 
             clear_flag(FLAG_H);
             clear_flag(FLAG_C);
-            set_flag(FLAG_N);
+            clear_flag(FLAG_N);
             if ((r16 & 0xFFF) + (cpu.HL & 0xFFF) > 0xFFF) set_flag(FLAG_H);
             if (result > 0xFFFF) set_flag(FLAG_C);
 
@@ -826,6 +842,7 @@ uint8_t cpu_execute(uint16_t opcode) {
             u3 = (opcode - 0xCB40) / 8;
 
             if (!(r8 & (1 << u3))) set_flag(FLAG_Z);
+            else clear_flag(FLAG_Z);
             clear_flag(FLAG_N);
             set_flag(FLAG_H);
 
@@ -907,15 +924,13 @@ uint8_t cpu_execute(uint16_t opcode) {
             uint8_t r8_value = *r8p;
 
             if (is_set(FLAG_C))
-                *r8p = (r8_value << 1) & 1;
+                *r8p = (r8_value << 1) | 1;
             else
                 *r8p = (r8_value << 1);
 
+            cpu.F = 0;
             if (*r8p == 0) set_flag(FLAG_Z);
-            clear_flag(FLAG_N);
-            clear_flag(FLAG_H);
             if (r8_value & 0x80) set_flag(FLAG_C);
-            else clear_flag(FLAG_C);
 
             cpu.PC += 2;
             M_cycles = 2;
@@ -927,16 +942,15 @@ uint8_t cpu_execute(uint16_t opcode) {
             uint8_t value = read_from_memory(cpu.HL);
 
             if (is_set(FLAG_C))
-                write_to_memory(cpu.HL, (value << 1) & 1);
+                write_to_memory(cpu.HL, (value << 1) | 1);
             else
                 write_to_memory(cpu.HL, value << 1);
 
             uint8_t result = read_from_memory(cpu.HL);
+
+            clear_all_flags();
             if (result == 0) set_flag(FLAG_Z);
-            clear_flag(FLAG_N);
-            clear_flag(FLAG_H);
             if (value & 0x80) set_flag(FLAG_C);
-            else clear_flag(FLAG_C);
 
             cpu.PC += 2;
             M_cycles = 4;
@@ -947,15 +961,12 @@ uint8_t cpu_execute(uint16_t opcode) {
         case(0x17): {
             uint8_t A_value = cpu.A;
             if (is_set(FLAG_C))
-                cpu.A = (A_value << 1) & 1;
+                cpu.A = (A_value << 1) | 1;
             else
                 cpu.A = A_value << 1;
 
-            clear_flag(FLAG_Z);
-            clear_flag(FLAG_N);
-            clear_flag(FLAG_H);
+            cpu.F = 0;
             if (A_value & 0x80) set_flag(FLAG_C);
-            else clear_flag(FLAG_C);
 
             cpu.PC += 1;
             M_cycles = 1;
@@ -972,15 +983,13 @@ uint8_t cpu_execute(uint16_t opcode) {
             uint8_t r8_value = *r8p;
 
             if (r8_value & 0x80)
-                *r8p = (r8_value << 1) & 1;
+                *r8p = (r8_value << 1) | 1;
             else
                 *r8p = (r8_value << 1);
 
+            clear_all_flags();
             if (*r8p == 0) set_flag(FLAG_Z);
-            clear_flag(FLAG_N);
-            clear_flag(FLAG_H);
             if (r8_value & 0x80) set_flag(FLAG_C);
-            else clear_flag(FLAG_C);
 
             cpu.PC += 2;
             M_cycles = 2;
@@ -992,16 +1001,15 @@ uint8_t cpu_execute(uint16_t opcode) {
             uint8_t value = read_from_memory(cpu.HL);
 
             if (value & 0x80)
-                write_to_memory(cpu.HL, (value << 1) & 1);
+                write_to_memory(cpu.HL, (value << 1) | 1);
             else
                 write_to_memory(cpu.HL, value << 1);
 
             uint8_t result = read_from_memory(cpu.HL);
+
+            clear_all_flags();
             if (result == 0) set_flag(FLAG_Z);
-            clear_flag(FLAG_N);
-            clear_flag(FLAG_H);
             if (value & 0x80) set_flag(FLAG_C);
-            else clear_flag(FLAG_C);
 
             cpu.PC += 2;
             M_cycles = 4;
@@ -1012,15 +1020,12 @@ uint8_t cpu_execute(uint16_t opcode) {
         case(0x07): {
             uint8_t A_value = cpu.A;
             if (A_value & 0x80)
-                cpu.A = (A_value << 1) & 1;
+                cpu.A = (A_value << 1) | 1;
             else
                 cpu.A = A_value << 1;
 
-            clear_flag(FLAG_Z);
-            clear_flag(FLAG_N);
-            clear_flag(FLAG_H);
+            clear_all_flags();
             if (A_value & 0x80) set_flag(FLAG_C);
-            else clear_flag(FLAG_C);
 
             cpu.PC += 1;
             M_cycles = 1;
@@ -1035,17 +1040,18 @@ uint8_t cpu_execute(uint16_t opcode) {
             r8p = regs[opcode - 0xCB18];
 
             uint8_t r8_value = *r8p;
+            uint8_t result;
 
             if (is_set(FLAG_C))
-                *r8p = (r8_value >> 1) & 0x80;
+                result = (r8_value >> 1) | 0x80;
             else
-                *r8p = (r8_value >> 1);
+                result = (r8_value >> 1);
 
-            if (*r8p == 0) set_flag(FLAG_Z);
-            clear_flag(FLAG_N);
-            clear_flag(FLAG_H);
+            *r8p = result;
+
+            clear_all_flags();
+            if (result == 0) set_flag(FLAG_Z);
             if (r8_value & 1) set_flag(FLAG_C);
-            else clear_flag(FLAG_C);
 
             cpu.PC += 2;
             M_cycles = 2;
@@ -1058,17 +1064,15 @@ uint8_t cpu_execute(uint16_t opcode) {
             uint8_t result;
 
             if (is_set(FLAG_C))
-                result = (value >> 1) & 0x80;
+                result = (value >> 1) | 0x80;
             else
                 result = (value >> 1);
             
             write_to_memory(cpu.HL, result);
 
+            clear_all_flags();
             if (result == 0) set_flag(FLAG_Z);
-            clear_flag(FLAG_N);
-            clear_flag(FLAG_H);
             if (value & 1) set_flag(FLAG_C);
-            else clear_flag(FLAG_C);
 
             cpu.PC += 2;
             M_cycles = 4;
@@ -1079,15 +1083,12 @@ uint8_t cpu_execute(uint16_t opcode) {
         case(0x1F): {
             uint8_t A_value = cpu.A;
             if (is_set(FLAG_C))
-                cpu.A = (A_value >> 1) & 0x80;
+                cpu.A = (A_value >> 1) | 0x80;
             else
                 cpu.A = A_value >> 1;
 
-            clear_flag(FLAG_Z);
-            clear_flag(FLAG_N);
-            clear_flag(FLAG_H);
+            clear_all_flags();
             if (A_value & 1) set_flag(FLAG_C);
-            else clear_flag(FLAG_C);
 
             cpu.PC += 1;
             M_cycles = 1;
@@ -1104,15 +1105,13 @@ uint8_t cpu_execute(uint16_t opcode) {
             uint8_t r8_value = *r8p;
 
             if (r8_value & 1)
-                *r8p = (r8_value >> 1) & 0x80;
+                *r8p = (r8_value >> 1) | 0x80;
             else
                 *r8p = (r8_value >> 1);
 
+            clear_all_flags();
             if (*r8p == 0) set_flag(FLAG_Z);
-            clear_flag(FLAG_N);
-            clear_flag(FLAG_H);
             if (r8_value & 1) set_flag(FLAG_C);
-            else clear_flag(FLAG_C);
 
             cpu.PC += 2;
             M_cycles = 2;
@@ -1125,17 +1124,15 @@ uint8_t cpu_execute(uint16_t opcode) {
             uint8_t result;
 
             if (value & 1)
-                result = (value >> 1) & 0x80;
+                result = (value >> 1) | 0x80;
             else
                 result = (value >> 1);
             
             write_to_memory(cpu.HL, result);
 
+            clear_all_flags();
             if (result == 0) set_flag(FLAG_Z);
-            clear_flag(FLAG_N);
-            clear_flag(FLAG_H);
             if (value & 1) set_flag(FLAG_C);
-            else clear_flag(FLAG_C);
 
             cpu.PC += 2;
             M_cycles = 4;
@@ -1146,15 +1143,12 @@ uint8_t cpu_execute(uint16_t opcode) {
         case(0x0F): {
             uint8_t A_value = cpu.A;
             if (A_value & 1)
-                cpu.A = (A_value >> 1) & 0x80;
+                cpu.A = (A_value >> 1) | 0x80;
             else
                 cpu.A = A_value >> 1;
 
-            clear_flag(FLAG_Z);
-            clear_flag(FLAG_N);
-            clear_flag(FLAG_H);
+            clear_all_flags();
             if (A_value & 1) set_flag(FLAG_C);
-            else clear_flag(FLAG_C);
 
             cpu.PC += 1;
             M_cycles = 1;
@@ -1171,11 +1165,9 @@ uint8_t cpu_execute(uint16_t opcode) {
             uint8_t r8_value = *r8p;
             *r8p = (r8_value << 1);
 
+            clear_all_flags();
             if (*r8p == 0) set_flag(FLAG_Z);
-            clear_flag(FLAG_N);
-            clear_flag(FLAG_H);
             if (r8_value & 0x80) set_flag(FLAG_C);
-            else clear_flag(FLAG_C);
 
             cpu.PC += 2;
             M_cycles = 2;
@@ -1188,11 +1180,9 @@ uint8_t cpu_execute(uint16_t opcode) {
             uint8_t result = value << 1;
             write_to_memory(cpu.HL, result);
 
+            clear_all_flags();
             if (result == 0) set_flag(FLAG_Z);
-            clear_flag(FLAG_N);
-            clear_flag(FLAG_H);
             if (value & 0x80) set_flag(FLAG_C);
-            else clear_flag(FLAG_C);
 
             cpu.PC += 2;
             M_cycles = 4;
@@ -1208,16 +1198,13 @@ uint8_t cpu_execute(uint16_t opcode) {
 
             uint8_t r8_value = *r8p;
             if (r8_value & 0x80)
-                *r8p = (r8_value >> 1) & 0x80;
+                *r8p = (r8_value >> 1) | 0x80;
             else
                 *r8p = (r8_value >> 1);
 
+            clear_all_flags();
             if (*r8p == 0) set_flag(FLAG_Z);
-            clear_flag(FLAG_N);
-            clear_flag(FLAG_H);
             if (r8_value & 1) set_flag(FLAG_C);
-            else clear_flag(FLAG_C);
-
             cpu.PC += 2;
             M_cycles = 2;
             break;
@@ -1228,17 +1215,14 @@ uint8_t cpu_execute(uint16_t opcode) {
             uint8_t value = read_from_memory(cpu.HL);
             uint8_t result;
             if (value & 0x80)
-                result = (value >> 1) & 0x80;
+                result = (value >> 1) | 0x80;
             else
                 result = (value >> 1);
             write_to_memory(cpu.HL, result);
 
+            clear_all_flags();
             if (result == 0) set_flag(FLAG_Z);
-            clear_flag(FLAG_N);
-            clear_flag(FLAG_H);
             if (value & 1) set_flag(FLAG_C);
-            else clear_flag(FLAG_C);
-
             cpu.PC += 2;
             M_cycles = 4;
             break;
@@ -1252,13 +1236,12 @@ uint8_t cpu_execute(uint16_t opcode) {
             r8p = regs[opcode - 0xCB38];
 
             uint8_t r8_value = *r8p;
-            *r8p = (r8_value >> 1);
+            uint8_t result = (r8_value >> 1);
+            *r8p = result;
 
-            if (*r8p == 0) set_flag(FLAG_Z);
-            clear_flag(FLAG_N);
-            clear_flag(FLAG_H);
+            clear_all_flags();
+            if (result == 0) set_flag(FLAG_Z);
             if (r8_value & 1) set_flag(FLAG_C);
-            else clear_flag(FLAG_C);
 
             cpu.PC += 2;
             M_cycles = 2;
@@ -1270,11 +1253,11 @@ uint8_t cpu_execute(uint16_t opcode) {
             uint8_t value = read_from_memory(cpu.HL);
             uint8_t result = value >> 1;
 
+            clear_all_flags();
             if (result == 0) set_flag(FLAG_Z);
-            clear_flag(FLAG_N);
-            clear_flag(FLAG_H);
             if (value & 1) set_flag(FLAG_C);
-            else clear_flag(FLAG_C);
+
+            write_to_memory(cpu.HL, result);
 
             cpu.PC += 2;
             M_cycles = 4;
@@ -1285,17 +1268,15 @@ uint8_t cpu_execute(uint16_t opcode) {
         case(0xCB30): case(0xCB31): case(0xCB32): case(0xCB33): 
         case(0xCB34): case(0xCB35): case(0xCB37): {
             uint8_t* r8p;
-            uint8_t *regs[8] = {&cpu.B, &cpu.C, &cpu.D, &cpu.E, &cpu.H, &cpu.L, &memory[cpu.HL], &cpu.A};
+            uint8_t *regs[8] = {&cpu.B, &cpu.C, &cpu.D, &cpu.E, &cpu.H, &cpu.L, NULL, &cpu.A};
             r8p = regs[opcode - 0xCB30];
 
             uint8_t upper_4 = *r8p >> 4;
             uint8_t lower_4 = *r8p & 0xF;
             *r8p = (lower_4 << 4) | (upper_4);
 
+            clear_all_flags();
             if (*r8p == 0) set_flag(FLAG_Z);
-            clear_flag(FLAG_N);
-            clear_flag(FLAG_H);
-            clear_flag(FLAG_C);
 
             cpu.PC += 2;
             M_cycles = 2;
@@ -1312,10 +1293,8 @@ uint8_t cpu_execute(uint16_t opcode) {
 
             write_to_memory(cpu.HL, result);
 
+            clear_all_flags();
             if (result == 0) set_flag(FLAG_Z);
-            clear_flag(FLAG_N);
-            clear_flag(FLAG_H);
-            clear_flag(FLAG_C);
 
             cpu.PC += 2;
             M_cycles = 4;
@@ -1328,8 +1307,8 @@ uint8_t cpu_execute(uint16_t opcode) {
         case(0xCD): {
             uint16_t n16 = (memory[cpu.PC+2] << 8) | memory[cpu.PC+1];
             cpu.PC += 3;
-            memory[cpu.SP-1] = cpu.PC >> 8;
-            memory[cpu.SP-2] = cpu.PC & 0xFF;
+            write_to_memory(cpu.SP-1, cpu.PC >> 8);
+            write_to_memory(cpu.SP-2, cpu.PC & 0xFF);
             cpu.SP -= 2;
             cpu.PC = n16;
             M_cycles = 6;
@@ -1344,8 +1323,8 @@ uint8_t cpu_execute(uint16_t opcode) {
                 ((opcode == 0xD4) && !is_set(FLAG_C)) ||
                 ((opcode == 0xCC) &&  is_set(FLAG_Z)) || 
                 ((opcode == 0xDC) &&  is_set(FLAG_C))) {
-                memory[cpu.SP-1] = cpu.PC >> 8;
-                memory[cpu.SP-2] = cpu.PC & 0xFF;
+                write_to_memory(cpu.SP-1, cpu.PC >> 8);
+                write_to_memory(cpu.SP-2, cpu.PC & 0xFF);
                 cpu.SP -= 2;
                 cpu.PC = n16;
                 M_cycles = 6;       
@@ -1389,11 +1368,7 @@ uint8_t cpu_execute(uint16_t opcode) {
 
         // JR n16
         case(0x18): {
-            uint8_t n8 = memory[cpu.PC+1];
-            int8_t e8;
-            if (n8 & 0x80) e8 = -(~n8 +1);
-            else e8 = n8 & ~0x80;
-
+            int8_t e8 = (int8_t)memory[cpu.PC+1];
             cpu.PC += e8 + 2;
             M_cycles = 3;
             break;
@@ -1403,11 +1378,7 @@ uint8_t cpu_execute(uint16_t opcode) {
         case(0x20): case(0x30): case(0x28): case(0x38): {
             if (((opcode == 0x28) && is_set(FLAG_Z)) || ((opcode == 0x38) && is_set(FLAG_C)) ||
                 ((opcode == 0x20) && !is_set(FLAG_Z)) || ((opcode == 0x30) && !is_set(FLAG_C))) {
-                uint8_t n8 = memory[cpu.PC+1];
-                int8_t e8;
-                if (n8 & 0x80) e8 = -(~n8 + 1);
-                else e8 = n8 & ~0x80;
-
+                int8_t e8 = (int8_t)memory[cpu.PC+1];
                 cpu.PC += e8 + 2;
                 M_cycles = 3;
             }
@@ -1420,8 +1391,8 @@ uint8_t cpu_execute(uint16_t opcode) {
 
         // RET
         case(0xC9): {
-            cpu.PC = memory[cpu.SP];
-            cpu.PC |= memory[cpu.SP+1] << 8;
+            cpu.PC = read_from_memory(cpu.SP);
+            cpu.PC |= read_from_memory(cpu.SP+1) << 8;
             cpu.SP += 2;
 
             M_cycles = 4;
@@ -1433,9 +1404,9 @@ uint8_t cpu_execute(uint16_t opcode) {
             if (((opcode == 0xC8) &&  is_set(FLAG_Z)) || 
                 ((opcode == 0xD8) &&  is_set(FLAG_C)) ||
                 ((opcode == 0xC0) && !is_set(FLAG_Z)) || 
-                ((opcode == 0xD8) && !is_set(FLAG_C))) {
-                cpu.PC = memory[cpu.SP];
-                cpu.PC |= memory[cpu.SP+1] << 8;
+                ((opcode == 0xD0) && !is_set(FLAG_C))) {
+                cpu.PC = read_from_memory(cpu.SP);
+                cpu.PC |= read_from_memory(cpu.SP+1) << 8;
                 cpu.SP += 2;
 
                 M_cycles = 5;
@@ -1449,12 +1420,12 @@ uint8_t cpu_execute(uint16_t opcode) {
 
         // RETI
         case(0xD9): {
-            cpu.PC = memory[cpu.SP];
-            cpu.PC |= memory[cpu.SP+1] << 8;
+            cpu.PC = read_from_memory(cpu.SP);
+            cpu.PC |= read_from_memory(cpu.SP+1) << 8;
             cpu.SP += 2;
 
             M_cycles = 4;
-            IME_flag = 0;
+            IME_flag = 1;
             break;
         }
 
@@ -1471,8 +1442,9 @@ uint8_t cpu_execute(uint16_t opcode) {
             else if (opcode == 0xF7) vec = 0x30;
             else vec = 0x38;
 
-            memory[cpu.SP-1] = cpu.PC >> 8;
-            memory[cpu.SP-2] = cpu.PC & 0xFF;
+            cpu.PC += 1;
+            write_to_memory(cpu.SP-1, cpu.PC >> 8);
+            write_to_memory(cpu.SP-2, cpu.PC & 0xFF);
             cpu.SP -= 2;
             cpu.PC = vec;
             M_cycles = 4;
@@ -1506,23 +1478,14 @@ uint8_t cpu_execute(uint16_t opcode) {
 
         // ADD SP, e8
         case(0xE8): {
-            uint8_t n8 = memory[cpu.PC+1];
-            int8_t e8;
-            if (n8 & 0x80) e8 = -(n8 & 0x7F);
-            else e8 = n8 & 0x7F;
+            int8_t e8 = (int8_t)memory[cpu.PC+1];
+            uint16_t result = cpu.SP + e8;            
 
-            cpu.SP += e8;
+            clear_all_flags();
+            if (((cpu.SP & 0xF) + (e8 & 0xF)) > 0xF) set_flag(FLAG_H);
+            if (((cpu.SP & 0xFF) + (e8 & 0xFF)) > 0xFF) set_flag(FLAG_C);
 
-            clear_flag(FLAG_Z);
-            clear_flag(FLAG_N);
-            if (e8 >= 0) {
-                if ((cpu.SP & 0xF) + (e8 & 0xF) > 0xF) set_flag(FLAG_H);
-                if ((cpu.SP & 0xFF) + e8 > 0xFF) set_flag(FLAG_C);
-            }
-            else {
-                if ((cpu.SP & 0xF) < (e8 & 0xF)) set_flag(FLAG_H);
-                if ((cpu.SP & 0xFF) < e8) set_flag(FLAG_C);
-            }
+            cpu.SP = result;
 
             cpu.PC += 2;
             M_cycles = 4;
@@ -1538,6 +1501,7 @@ uint8_t cpu_execute(uint16_t opcode) {
             else r16p = &cpu.AF;
 
             *r16p = (memory[cpu.SP+1] << 8) | memory[cpu.SP];
+            if (opcode == 0xF1) *r16p &= 0xFFF0;
             cpu.SP += 2;
 
             cpu.PC += 1;
@@ -1575,7 +1539,7 @@ uint8_t cpu_execute(uint16_t opcode) {
 
         // EI
         case(0xFB): {
-            IME_flag_next = 0;
+            IME_flag_next = 1;
             cpu.PC += 1;
             M_cycles = 1;
             break;
@@ -1593,18 +1557,26 @@ uint8_t cpu_execute(uint16_t opcode) {
         // DAA
         case(0x27): {
             int adjustment = 0;
+            uint8_t result;
             if (is_set(FLAG_N)) {
-                if (is_set(FLAG_H)) adjustment += 0x6;
-                if (is_set(FLAG_C)) adjustment += 0x60;
-                cpu.A -= adjustment;
-
+                if (is_set(FLAG_H)) 
+                    adjustment += 0x6;
+                if (is_set(FLAG_C)) 
+                    adjustment += 0x60;
+                result = cpu.A - adjustment;
+                cpu.A = result;
             }
             else {
-                if (is_set(FLAG_H) || (cpu.A & 0xF) > 0x9) adjustment += 0x6;
-                if (is_set(FLAG_C) || cpu.A > 0x99) adjustment += 0x60;
-                cpu.A += adjustment; 
+                if (is_set(FLAG_H) || (cpu.A & 0xF) > 0x9) 
+                    adjustment += 0x6;
+                if (is_set(FLAG_C) || cpu.A > 0x99) 
+                    adjustment += 0x60;
+                result = cpu.A + adjustment;
+                if ((cpu.A + adjustment) > 0xFF) set_flag(FLAG_C);
+                cpu.A = result;
             }
-            if (adjustment == 0) set_flag(FLAG_Z);
+            if (cpu.A == 0) set_flag(FLAG_Z);
+            else clear_flag(FLAG_Z);
             clear_flag(FLAG_H);
 
             cpu.PC += 1;
