@@ -6,12 +6,13 @@
 uint8_t handle_interrupts() {
     if (IME_flag == 0)
         return 0;
-    else if (memory[IE] & memory[IF] == 0)
+    else if ((memory[IE] & memory[IF]) == 0)
         return 0;
 
     memory[cpu.SP-1] = cpu.PC >> 8;
     memory[cpu.SP-2] = cpu.PC & 0xFF;
     cpu.SP -= 2;
+    IME_flag = 0;
 
     if (memory[IE] & 0x1 && memory[IF] & 0x1) {
         cpu.PC = 0x40;

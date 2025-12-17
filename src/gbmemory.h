@@ -49,19 +49,34 @@
 
 uint8_t memory[0x10000];
 
+struct rom_bank {
+    uint8_t byte[0x4000];
+};
+
 void init_memory(char* rom_path){
     FILE *rom_file = fopen(rom_path, "rb");
     if (rom_file == NULL) {
         printf("Could not open file!\n");
-    }
-    fseek(rom_file, 0, SEEK_END);
-    int rom_length = ftell(rom_file);
-    fseek(rom_file, 0, SEEK_SET);
-    fread(memory, 1, rom_length, rom_file);
-    fclose(rom_file);
+    }    
 
-    if (memory[0x147] == 0x01) {
-        
+    if (memory[0x147] == 0) {
+        fseek(rom_file, 0, SEEK_END);
+        int rom_length = ftell(rom_file);
+        fseek(rom_file, 0, SEEK_SET);
+        fread(memory, 1, rom_length, rom_file);
+        fclose(rom_file);
+    }
+    else if (memory[0x147] == 1) {
+        fseek(rom_file, 0, SEEK_END);
+        int rom_length = ftell(rom_file);
+        int memory_bank_num = rom_length / 0x4000;
+        struct rom_bank *rom_banks = malloc(memory_bank_num * sizeof(struct rom_bank));
+        fseek(rom_file, 0, SEEK_SET);
+        fread(rom_banks, 1, rom_length, rom_file);
+
+        for (int i = 0; i < 0x4000; i++) {
+            memory[i] = 0;
+        }
     }
 
     memory[P1] = 0xCF;
@@ -93,26 +108,16 @@ void init_memory(char* rom_path){
     memory[NR50] = 0x77;
     memory[NR51] = 0xF3;
     memory[NR52] = 0xF1;
-    memory[LCDC] = 0x11;
+    memory[LCDC] = 0x00;
     memory[STAT] = 0x82;
     memory[SCY] = 0x00;
     memory[SCX] = 0x00;
-    memory[LY] = 0x91;
+    memory[LY] = 0x00;
     memory[LYC] = 0x00;
     memory[DMA] = 0xFF;
     memory[BGP] = 0xFC;
     memory[WY] = 0x00;
-    memory[WX] = 0x00;
-
-    uint8_t sprite[16] = {0x3C, 0x7E, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x7E, 0x5E, 0x7E, 0x0A, 0x7C, 0x56, 0x38, 0x7C};
-    for (int i = 0; i < 16; i++) {
-        memory[0x8000+i] = sprite[i];
-    }
-    memory[0xFE00] = 16;
-    memory[0xFE01] = 8;
-    memory[0xFE02] = 0;
-    memory[0xFE03] = 0;
-    
+    memory[WX] = 0x00;    
 }
 
 #endif
